@@ -62,6 +62,7 @@ const createAbstractMark = (mark, ms, writeAndCreateMark) => {
 		start(ms)
 	}
 	const isAbstract = () => concretized === false
+	const isConcrete = () => concretized
 
 	start(ms)
 
@@ -70,6 +71,7 @@ const createAbstractMark = (mark, ms, writeAndCreateMark) => {
 		set,
 		cancel,
 		isAbstract,
+		isConcrete,
 		debounce
 	}
 }
@@ -107,35 +109,23 @@ export const createFrequency = (interval = 0) => {
 	}
 	reset()
 
-	const createMark = properties => {
-		const mark = {}
+	const createMark = () => {
 		const ms = nowMs()
-		let msSpacing
-		if (previousMark) {
-			msSpacing = ms - previousMark.ms
-		} else {
-			msSpacing = ms - initialMs
-		}
-
-		Object.assign(mark, properties, {
+		return {
 			ms,
-			msSpacing
-		})
-
-		return mark
+			msSpacing: ms - (previousMark ? previousMark.ms : initialMs)
+		}
 	}
 
 	const write = mark => {
 		const { position } = mark
 
-		if (position === "trailing" || position === "cleanup") {
-			trailing = null
-		} else if (trailing && trailing.isAbstract()) {
+		if (position !== "trailing" && trailing && trailing.isAbstract()) {
 			trailing.debounce(mark, interval - mark.msSpacing)
 		} else {
 			trailing = createAbstractMark(mark, interval - mark.msSpacing, reducedMark =>
 				write(
-					createMark({
+					Object.assign(createMark(), {
 						position: "trailing",
 						thisValue: reducedMark.thisValue,
 						args: reducedMark.args
@@ -144,14 +134,12 @@ export const createFrequency = (interval = 0) => {
 			)
 		}
 
-		if (position === "cleanup") {
-			cleanup = null
-		} else if (cleanup && cleanup.isAbstract()) {
+		if (position !== "cleanup" && cleanup && cleanup.isAbstract()) {
 			cleanup.debounce(mark, interval)
 		} else {
 			cleanup = createAbstractMark(mark, interval, reducedMark =>
 				write(
-					createMark({
+					Object.assign(createMark(), {
 						position: "cleanup",
 						thisValue: reducedMark.thisValue,
 						args: reducedMark.args
@@ -170,10 +158,7 @@ export const createFrequency = (interval = 0) => {
 	}
 
 	const ping = function() {
-		const mark = createMark({
-			thisValue: this,
-			args: arguments
-		})
+		const mark = createMark()
 		const { ms, msSpacing } = mark
 		let position
 		let positionReason
@@ -199,10 +184,19 @@ export const createFrequency = (interval = 0) => {
 			}
 		}
 
-		mark.position = position
-		mark.positionReason = positionReason
+		const listenTrailing = (fn, reducer) => trailing.set(fn, reducer)
+		const listenCleanup = (fn, reducer) => cleanup.set(fn, reducer)
 
-		return write(mark)
+		Object.assign(mark, {
+			position,
+			positionReason,
+			listenTrailing,
+			listenCleanup
+		})
+
+		write(mark)
+
+		return mark
 	}
 
 	return {
