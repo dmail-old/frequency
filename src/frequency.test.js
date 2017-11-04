@@ -8,18 +8,26 @@ import { createTest } from "@dmail/test"
 import {
 	expectChain,
 	expectMatch,
-	expectCalledOnce,
+	expectCalled,
+	matchFunction,
 	expectCalledOnceWith,
 	expectNotCalled,
 	matchPropertiesDeep,
-	matchProperties,
 	matchPropertiesAllowingExtra
 } from "@dmail/expect"
 import { mockExecution } from "micmac"
 import { createSpy } from "@dmail/spy"
 
-const expectCalledIn = (tracker, expectedMs) => {
-	// todo: tracker.createReport().msCalled - msCreated === expectedMs
+const expectCalledIn = (spy, expectedMs) => {
+	const tracker = spy.track(0)
+	return expectCalled(tracker).then(() => {
+		const { msCreated, msCalled } = tracker.createReport()
+		const actualMs = msCalled - msCreated
+		return expectMatch(actualMs, expectedMs).then(
+			null,
+			() => `expect ${spy} to be called in ${expectedMs} but was called in ${actualMs}`
+		)
+	})
 }
 
 export default createTest({
@@ -33,10 +41,10 @@ export default createTest({
 					expectMatch(
 						ping(),
 						matchPropertiesAllowingExtra({
-							position: "leading",
-							positionReason: "first ping",
 							ms: 0,
-							msSpacing: 0
+							msSpacingWithPrevious: 0,
+							position: "leading",
+							positionReason: "first ping"
 						})
 					),
 				() => tickRelative(30),
@@ -44,10 +52,10 @@ export default createTest({
 					expectMatch(
 						ping(),
 						matchPropertiesAllowingExtra({
-							position: "inside",
-							positionReason: `30ms ellapsed since last valid ping (not enough regarding 50ms interval)`,
 							ms: 30,
-							msSpacing: 30
+							msSpacingWithPrevious: 30,
+							position: "inside",
+							positionReason: `30ms ellapsed since previous valid ping (not enough regarding 50ms interval)`
 						})
 					),
 				() => tickRelative(60),
@@ -55,10 +63,10 @@ export default createTest({
 					expectMatch(
 						ping(),
 						matchPropertiesAllowingExtra({
-							position: "middle",
-							positionReason: `60ms ellapsed since last valid ping (enough regarding 50ms interval)`,
 							ms: 60,
-							msSpacing: 30
+							msSpacingWithPrevious: 30,
+							position: "middle",
+							positionReason: `60ms ellapsed since previous valid ping (enough regarding 50ms interval)`
 						})
 					),
 				() => tickRelative(130),
@@ -66,75 +74,89 @@ export default createTest({
 					expectMatch(
 						ping(),
 						matchPropertiesAllowingExtra({
-							position: "leading",
-							positionReason: `70ms ellapsed since last ping (more than 50ms interval)`,
 							ms: 130,
-							msSpacing: 70
+							msSpacingWithPrevious: 70,
+							position: "leading",
+							positionReason: `70ms ellapsed without ping (more than 50ms interval)`
 						})
 					)
 			)
-		})
-	/*
-	"trailing state can be listened": () =>
-		mockExecution(({ tickAbsolute }) => {
+		}),
+	"listenTrailing()": () =>
+		mockExecution(({ setTimeReference, tickRelative }) => {
+			setTimeReference()
 			const { ping } = createFrequency(50)
 			const firstPingValue = "foo"
-			const firstState = ping(firstPingValue)
 			const secondPingValue = 2
-			ping(secondPingValue)
-			const setSpy = createSpy()
-			const reducerSpy = createSpy(handlers => handlers[handlers.length - 1].value)
-
-			firstState.trailing.set(setSpy, reducerSpy)
+			const firstMark = ping(firstPingValue)
+			const secondMark = ping(secondPingValue)
+			const trailingSpy = createSpy("trailing")
+			const reducerSpy = createSpy((...marks) => marks[marks.length - 1])
+			firstMark.listenTrailing(trailingSpy, reducerSpy)
 
 			return expectChain(
-				() => tickAbsolute(150),
-				() => expectCalledOnce(reducerSpy),
-				() =>
-					expectMatch(
-						reducerSpy.getReport(0).argValues.map(handler => handler.value.args),
-						matchPropertiesDeep([[firstPingValue], [secondPingValue]])
-					),
+				() => tickRelative(150),
+				() => expectCalledOnceWith(reducerSpy, firstMark, secondMark),
 				() =>
 					expectCalledOnceWith(
-						setSpy,
-						matchPropertiesAllowingExtra({
+						trailingSpy,
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [secondPingValue],
 							position: "trailing",
-							ms: 100,
-							msSpacing: 50,
-							args: matchProperties([secondPingValue])
+							ms: 150,
+							msSpacingWithPrevious: 150,
+							msSpacingWithReference: 150,
+							listenTrailing: matchFunction(),
+							listenCleanup: matchFunction()
 						})
 					),
-				() => expectCalledIn(setSpy, 100)
+				() => expectCalledIn(trailingSpy, 150)
 			)
 		}),
-	"trailing state can be unlistened": () =>
-		mockExecution(({ tickAbsolute }) => {
+	"listenTrailing() can be unlistened": () =>
+		mockExecution(({ tickRelative }) => {
 			const { ping } = createFrequency(50)
-			const setSpy = createSpy()
+			const trailingSpy = createSpy()
 			const firstState = ping()
-			const stopListening = firstState.trailing.set(setSpy)
-			ping()
+			const stopListening = firstState.listenTrailing(trailingSpy)
 			stopListening()
-			tickAbsolute(150)
-			return expectNotCalled(setSpy)
+			tickRelative(150)
+			return expectNotCalled(trailingSpy)
 		}),
 	"trailing state is debounced": () =>
-		mockExecution(({ tickAbsolute }) => {
+		mockExecution(({ setTimeReference, tickRelative }) => {
+			setTimeReference()
 			const { ping } = createFrequency(50)
-			const setSpy = createSpy()
-			ping().trailing.set(setSpy)
+			const trailingSpy = createSpy("trailing")
+			ping().listenTrailing(trailingSpy)
 
-			tickAbsolute(20)
-			ping()
-			tickAbsolute(60)
-			ping()
-			tickAbsolute(90)
-			ping()
-			tickAbsolute(150)
-			return expectCalledIn(setSpy, 140)
+			tickRelative(20)
+			ping("a")
+			tickRelative(30)
+			ping("b")
+			tickRelative(50)
+			return expectChain(
+				() =>
+					expectCalledOnceWith(
+						trailingSpy,
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: ["b"],
+							ms: 50,
+							msSpacingWithPrevious: 20,
+							msSpacingWithReference: 50,
+							position: "trailing",
+							listenTrailing: matchFunction(),
+							listenCleanup: matchFunction()
+						})
+					),
+				() => expectCalledIn(trailingSpy, 50)
+			)
 		})
-	*/
-	// todo: test that calling state.cleanup() register a function
-	// that will get called when ping stop emitting for the given interval
+	// à tester : lorsque trailing et cleanup se produisent en même temps voir ce qu'on fait
+	// je pense qu'il faudrais alors redelay le cleanup d'autant
+	// sauf qu'il sera marqué comme concrétiser non?
+	// à voir peut être que non et du coup il est debounce par le trailing comme on le souhaite
+	// tester state.listenCleanup()
 })

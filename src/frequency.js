@@ -1,7 +1,7 @@
 const nowMs = () => Number(new Date())
-const logEnabled = false
-const log = (...args) => (logEnabled ? console.log(...args) : null)
-const reduceValuesFromLast = handlers => handlers[handlers.length - 1].value
+// const logEnabled = false
+// const log = (...args) => (logEnabled ? console.log(...args) : null)
+const reduceToLast = (...marks) => marks[marks.length - 1]
 
 // createAbstractMark will try to writeAndCreateMark after Xms has ellapsed
 // an abstractmark can be debounced by other mark
@@ -36,7 +36,7 @@ const createAbstractMark = (mark, ms, writeAndCreateMark) => {
 			timeout = null
 		}
 	}
-	const set = (fn, secondFn = reduceValuesFromLast) => {
+	const set = (fn, secondFn = reduceToLast) => {
 		if (concretized) {
 			throw new Error("cannot listen for an already concretized mark")
 		}
@@ -76,23 +76,26 @@ const createAbstractMark = (mark, ms, writeAndCreateMark) => {
 	}
 }
 
-const createLeadingReason = (msSpacing, interval, first) => {
+const createLeadingReason = (msSpacingWithReference, interval, first) => {
 	if (first) {
 		return "first ping"
 	}
-	return `${msSpacing}ms ellapsed since last ping (more than ${interval}ms interval)`
+	return `${msSpacingWithReference}ms ellapsed without ping (more than ${interval}ms interval)`
 }
 const createMiddleReason = (msSpacingWithReference, interval) =>
-	`${msSpacingWithReference}ms ellapsed since last valid ping (enough regarding ${interval}ms interval)`
+	`${msSpacingWithReference}ms ellapsed since previous valid ping (enough regarding ${interval}ms interval)`
 const createInsideReason = (msSpacingWithReference, interval) =>
-	`${msSpacingWithReference}ms ellapsed since last valid ping (not enough regarding ${interval}ms interval)`
+	`${msSpacingWithReference}ms ellapsed since previous valid ping (not enough regarding ${interval}ms interval)`
 
 export const createFrequency = (interval = 0) => {
 	let initialMs
 	let previousMark
-	let referenceMark
+	let referenceMark // could be named previousNonInsideMark
 	let trailing
 	let cleanup
+
+	const listenTrailing = (fn, reducer) => trailing.set(fn, reducer)
+	const listenCleanup = (fn, reducer) => cleanup.set(fn, reducer)
 
 	const reset = () => {
 		initialMs = nowMs()
@@ -111,9 +114,14 @@ export const createFrequency = (interval = 0) => {
 
 	const createMark = () => {
 		const ms = nowMs()
+		const msSpacingWithReference = ms - (referenceMark ? referenceMark.ms : initialMs)
+		const msSpacingWithPrevious = ms - (previousMark ? previousMark.ms : initialMs)
 		return {
+			listenTrailing,
+			listenCleanup,
 			ms,
-			msSpacing: ms - (previousMark ? previousMark.ms : initialMs)
+			msSpacingWithReference,
+			msSpacingWithPrevious
 		}
 	}
 
@@ -121,14 +129,14 @@ export const createFrequency = (interval = 0) => {
 		const { position } = mark
 
 		if (position !== "trailing" && trailing && trailing.isAbstract()) {
-			trailing.debounce(mark, interval - mark.msSpacing)
+			trailing.debounce(mark, interval - mark.msSpacingWithReference)
 		} else {
-			trailing = createAbstractMark(mark, interval - mark.msSpacing, reducedMark =>
+			trailing = createAbstractMark(mark, interval - mark.msSpacingWithReference, reducedMark =>
 				write(
 					Object.assign(createMark(), {
 						position: "trailing",
 						thisValue: reducedMark.thisValue,
-						args: reducedMark.args
+						argValues: reducedMark.argValues
 					})
 				)
 			)
@@ -142,7 +150,7 @@ export const createFrequency = (interval = 0) => {
 					Object.assign(createMark(), {
 						position: "cleanup",
 						thisValue: reducedMark.thisValue,
-						args: reducedMark.args
+						argValues: reducedMark.argValues
 					})
 				)
 			)
@@ -157,42 +165,45 @@ export const createFrequency = (interval = 0) => {
 		return mark
 	}
 
-	const ping = function() {
-		const mark = createMark()
-		const { ms, msSpacing } = mark
-		let position
-		let positionReason
-
-		log(`invokation (relativeMs ${msSpacing}ms)`)
-
-		if (referenceMark === null || msSpacing > interval) {
-			log(`-> position: leading`)
-			position = "leading"
-			positionReason = createLeadingReason(msSpacing, interval, referenceMark === null)
-		} else {
-			const msSpacingWithReference = ms - referenceMark.ms
-			const intervalIsEllapsed = msSpacingWithReference > interval
-
-			if (intervalIsEllapsed) {
-				log(`-> position: middle`)
-				position = "middle"
-				positionReason = createMiddleReason(msSpacingWithReference, interval)
-			} else {
-				log("-> inside (too fast)")
-				position = "inside"
-				positionReason = createInsideReason(msSpacingWithReference, interval)
+	const getPosition = ({ msSpacingWithReference, msSpacingWithPrevious }) => {
+		if (referenceMark === null) {
+			return {
+				position: "leading",
+				positionReason: createLeadingReason(msSpacingWithReference, interval, true)
 			}
 		}
 
-		const listenTrailing = (fn, reducer) => trailing.set(fn, reducer)
-		const listenCleanup = (fn, reducer) => cleanup.set(fn, reducer)
+		if (msSpacingWithReference <= interval) {
+			return {
+				position: "inside",
+				positionReason: createInsideReason(msSpacingWithReference, interval)
+			}
+		}
 
-		Object.assign(mark, {
-			position,
-			positionReason,
-			listenTrailing,
-			listenCleanup
-		})
+		if (previousMark && msSpacingWithPrevious < interval) {
+			return {
+				position: "middle",
+				positionReason: createMiddleReason(msSpacingWithReference, interval)
+			}
+		}
+
+		return {
+			position: "leading",
+			positionReason: createLeadingReason(msSpacingWithReference, interval)
+		}
+	}
+
+	const ping = function(...args) {
+		const mark = createMark()
+
+		Object.assign(
+			mark,
+			{
+				thisValue: this,
+				argValues: args
+			},
+			getPosition(mark)
+		)
 
 		write(mark)
 
