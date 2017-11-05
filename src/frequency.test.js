@@ -12,8 +12,11 @@ import {
 	matchFunction,
 	expectCalledOnceWith,
 	expectNotCalled,
+	matchProperties,
 	matchPropertiesDeep,
-	matchPropertiesAllowingExtra
+	matchPropertiesAllowingExtra,
+	expectThrowWith,
+	matchError
 } from "@dmail/expect"
 import { mockExecution } from "micmac"
 import { createSpy } from "@dmail/spy"
@@ -31,7 +34,7 @@ const expectCalledIn = (spy, expectedMs) => {
 }
 
 export default createTest({
-	"leading/inside/middle basic ping": () =>
+	"start/keepalive/keppalive/start": () =>
 		mockExecution(({ setTimeReference, tickRelative }) => {
 			setTimeReference(0)
 			const { ping } = createFrequency(50)
@@ -40,123 +43,197 @@ export default createTest({
 				() =>
 					expectMatch(
 						ping(),
-						matchPropertiesAllowingExtra({
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [],
 							ms: 0,
-							msSpacingWithPrevious: 0,
-							position: "leading",
-							positionReason: "first ping"
+							msSpacingWithPrevious: undefined,
+							msSpacingWithStart: undefined,
+							type: "start",
+							listenStep: matchFunction()
 						})
 					),
 				() => tickRelative(30),
 				() =>
 					expectMatch(
 						ping(),
-						matchPropertiesAllowingExtra({
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [],
 							ms: 30,
 							msSpacingWithPrevious: 30,
-							position: "inside",
-							positionReason: `30ms ellapsed since previous valid ping (not enough regarding 50ms interval)`
+							msSpacingWithStart: 30,
+							type: "keepalive",
+							listenStep: matchFunction()
 						})
 					),
-				() => tickRelative(60),
+				() => tickRelative(80),
 				() =>
 					expectMatch(
 						ping(),
-						matchPropertiesAllowingExtra({
-							ms: 60,
-							msSpacingWithPrevious: 30,
-							position: "middle",
-							positionReason: `60ms ellapsed since previous valid ping (enough regarding 50ms interval)`
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [],
+							ms: 80,
+							// même lorsque le spacing est 50 pour une fréquence de 50
+							// c'est un keepalive et non pas un start, c'est vraiment
+							// quand la fréquence est dépassé qu'on passe en start
+							msSpacingWithPrevious: 50,
+							msSpacingWithStart: 80,
+							type: "keepalive",
+							listenStep: matchFunction()
 						})
 					),
-				() => tickRelative(130),
+				() => tickRelative(140),
 				() =>
 					expectMatch(
 						ping(),
-						matchPropertiesAllowingExtra({
-							ms: 130,
-							msSpacingWithPrevious: 70,
-							position: "leading",
-							positionReason: `70ms ellapsed without ping (more than 50ms interval)`
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [],
+							ms: 140,
+							msSpacingWithPrevious: 60,
+							msSpacingWithStart: 140,
+							type: "start",
+							listenStep: matchFunction()
 						})
 					)
 			)
 		}),
-	"listenTrailing()": () =>
+	"listenStep()": () =>
 		mockExecution(({ setTimeReference, tickRelative }) => {
+			// ici on s'assure qu'on peut utiliser listenStep pour appeler une fonction
+			// avec le résultat combiné des ping s'étant produits avant
+			// on peut voir que le reducer a le droit d'être différent
+
 			setTimeReference()
 			const { ping } = createFrequency(50)
 			const firstPingValue = "foo"
 			const secondPingValue = 2
 			const firstMark = ping(firstPingValue)
 			const secondMark = ping(secondPingValue)
-			const trailingSpy = createSpy("trailing")
-			const reducerSpy = createSpy((...marks) => marks[marks.length - 1])
-			firstMark.listenTrailing(trailingSpy, reducerSpy)
+			const firstStepSpy = createSpy("step")
+			const firstReducerSpy = createSpy((...marks) => marks[marks.length - 1])
+			firstMark.listenStep(firstStepSpy, firstReducerSpy)
+			const secondStepSpy = createSpy("step")
+			const secondReducerSpy = createSpy((...marks) => marks[0])
+			secondMark.listenStep(secondStepSpy, secondReducerSpy)
 
 			return expectChain(
-				() => tickRelative(150),
-				() => expectCalledOnceWith(reducerSpy, firstMark, secondMark),
+				() => tickRelative(52),
+				() => expectCalledOnceWith(firstReducerSpy, firstMark, secondMark),
 				() =>
 					expectCalledOnceWith(
-						trailingSpy,
+						firstStepSpy,
 						matchPropertiesDeep({
 							thisValue: undefined,
 							argValues: [secondPingValue],
-							position: "trailing",
-							ms: 150,
-							msSpacingWithPrevious: 150,
-							msSpacingWithReference: 150,
-							listenTrailing: matchFunction(),
-							listenCleanup: matchFunction()
+							ms: 52,
+							msSpacingWithPrevious: 52,
+							msSpacingWithStart: 52,
+							msExtra: 2,
+							type: "step",
+							listenStep: matchFunction()
 						})
 					),
-				() => expectCalledIn(trailingSpy, 150)
+				() => expectCalledIn(firstStepSpy, 52),
+				() => expectCalledOnceWith(secondReducerSpy, firstMark, secondMark),
+				() =>
+					expectCalledOnceWith(
+						secondStepSpy,
+						matchPropertiesDeep({
+							thisValue: undefined,
+							argValues: [firstPingValue],
+							ms: 52,
+							msSpacingWithPrevious: 52,
+							msSpacingWithStart: 52,
+							msExtra: 2,
+							type: "step",
+							listenStep: matchFunction()
+						})
+					),
+				() => expectCalledIn(secondStepSpy, 52)
 			)
 		}),
-	"listenTrailing() can be unlistened": () =>
+	"listenStep() can be unlistened": () =>
 		mockExecution(({ tickRelative }) => {
 			const { ping } = createFrequency(50)
-			const trailingSpy = createSpy()
-			const firstState = ping()
-			const stopListening = firstState.listenTrailing(trailingSpy)
+			const stepSpy = createSpy()
+			const firstMark = ping()
+			const stopListening = firstMark.listenStep(stepSpy)
 			stopListening()
-			tickRelative(150)
-			return expectNotCalled(trailingSpy)
+			tickRelative(100)
+			return expectNotCalled(stepSpy)
 		}),
-	"trailing state is debounced": () =>
-		mockExecution(({ setTimeReference, tickRelative }) => {
-			setTimeReference()
+	"listenStep() inside listenStep()": () =>
+		mockExecution(({ tickRelative }) => {
 			const { ping } = createFrequency(50)
-			const trailingSpy = createSpy("trailing")
-			ping().listenTrailing(trailingSpy)
-
-			tickRelative(20)
-			ping("a")
-			tickRelative(30)
-			ping("b")
+			const mark = ping()
+			const firstStepSpy = createSpy()
+			mark.listenStep(firstStepSpy)
 			tickRelative(50)
 			return expectChain(
 				() =>
 					expectCalledOnceWith(
-						trailingSpy,
-						matchPropertiesDeep({
-							thisValue: undefined,
-							argValues: ["b"],
-							ms: 50,
-							msSpacingWithPrevious: 20,
-							msSpacingWithReference: 50,
-							position: "trailing",
-							listenTrailing: matchFunction(),
-							listenCleanup: matchFunction()
+						firstStepSpy,
+						matchPropertiesAllowingExtra({
+							type: "step"
 						})
 					),
-				() => expectCalledIn(trailingSpy, 50)
+				() => {
+					const stepMark = firstStepSpy.getReport(0).argValues[0]
+					const secondStepSpy = createSpy()
+					stepMark.listenStep(secondStepSpy)
+					tickRelative(100)
+					return expectCalledOnceWith(
+						secondStepSpy,
+						matchPropertiesAllowingExtra({
+							type: "step"
+						})
+					)
+				}
+			)
+		}),
+	"listenStep() called exactly on time then an other too late": () =>
+		mockExecution(({ tickRelative }) => {
+			const { ping } = createFrequency(50)
+			ping()
+			tickRelative(20)
+			const mark = ping()
+			tickRelative(50)
+			mark.listenStep(() => {}) // does not throw
+			tickRelative(51)
+			return expectThrowWith(
+				() => mark.listenStep(() => {}),
+				matchError(
+					matchProperties({
+						message: "too late to call listenStep, 31ms ellapsed and you had 30ms"
+					})
+				)
+			)
+		}),
+	"listenStep() a first mark, then an other mark listenStep()": () =>
+		mockExecution(({ tickRelative }) => {
+			const { ping } = createFrequency(50)
+			const mark = ping()
+			mark.listenStep(() => {})
+			tickRelative(50)
+			const secondMark = ping()
+			const secondStepSpy = createSpy()
+			secondMark.listenStep(secondStepSpy)
+			return expectChain(
+				() => expectNotCalled(secondStepSpy),
+				() => tickRelative(100),
+				() =>
+					expectCalledOnceWith(
+						secondStepSpy,
+						matchPropertiesAllowingExtra({
+							type: "step"
+						})
+					)
 			)
 		})
-	// à tester : lorsque trailing et cleanup se produisent en même temps voir ce qu'on fait
-	// je pense qu'il faudrais alors redelay le cleanup d'autant
-	// sauf qu'il sera marqué comme concrétiser non?
-	// à voir peut être que non et du coup il est debounce par le trailing comme on le souhaite
-	// tester state.listenCleanup()
+
+	// à faire et à tester : listenEnd()
+	// en gros comme step mais end est toujours décalé de l'intervalle
 })
